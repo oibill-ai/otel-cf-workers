@@ -104,7 +104,6 @@ export function createDoMethodHandler(initialiser: Initialiser): MethodDecorator
 
 			try {
 				const metadata = originalRef['metadata']
-				originalRef['metadata'] = undefined
 				const executeEntrypointHandler = (): Promise<unknown> => {
 					if (propertyKey.startsWith('_')) {
 						if (!!metadata) {
