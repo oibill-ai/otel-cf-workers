@@ -1,5 +1,11 @@
 # @microlabs/otel-cf-workers
 
+## 1.0.0-fp.66
+
+### Patch Changes
+
+- c14f4ee: DO instrumentation was clearing the metadata field after first instrumented method call
+
 ## 1.0.0-fp.65
 
 ### Patch Changes

@@ -2470,7 +2470,7 @@ function createScheduledHandler(scheduledFn, initialiser) {
 }
 
 // versions.json
-var _microlabs_otel_cf_workers = "1.0.0-fp.65";
+var _microlabs_otel_cf_workers = "1.0.0-fp.66";
 var node = "22.14.0";
 
 // src/instrumentation/email.ts
@@ -2781,7 +2781,6 @@ function createDoMethodHandler(initialiser) {
       const context3 = setConfig(config);
       try {
         const metadata = originalRef["metadata"];
-        originalRef["metadata"] = void 0;
         const executeEntrypointHandler = () => {
           if (propertyKey.startsWith("_")) {
             if (!!metadata) {
