@@ -31,7 +31,7 @@ All public wrappers funnel through `createInitialiser(config)`, which builds an 
 - `instrument(handler, config)` — wraps an `ExportedHandler` (fetch/scheduled/queue/email).
 - `instrumentDO(class, config)` — wraps a Durable Object class (the legacy non-RPC pattern).
 - `instrumentEntrypoint(config)` / `InstrumentedEntrypoint` — method decorator + base class for `WorkerEntrypoint` (RPC).
-- `instrumentDOClassMetadata(config)` / `InstrumentedDurableObject` — method decorator + base class for RPC-style Durable Objects. Uses the `_setOpts(metadata)` channel and a private `_logger` so RPC callers can propagate W3C trace context as RPC arguments instead of HTTP headers.
+- `instrumentDOClassMetadata(config)` / `InstrumentedDurableObject` — method decorator + base class for RPC-style Durable Objects. Each RPC call opens a `DO RPC client <Namespace>.<method>` CLIENT span and appends a `{ __otel_carrier }` marker to the arguments, so W3C trace context propagates per call instead of once per instance. `_setOpts(metadata)` remains as the fallback for callers that bypass the wrapper.
 - `instrumentPage` — SvelteKit-style page handler wrapper.
 
 ### The proxy/wrap utility (`src/wrap.ts`)
@@ -40,7 +40,7 @@ All public wrappers funnel through `createInitialiser(config)`, which builds an 
 
 ### Environment instrumentation (`src/instrumentation/env.ts`)
 
-`instrumentEnv` returns a Proxy around the user's `env` object. On property access, it sniffs the value with duck-typed guards (`isKVNamespace`, `isQueue`, `isJSRPC`, `isD1Database`, `isAnalyticsEngineDataset`, `isVectorize`, `isVersionMetadata`) and returns the matching instrumented wrapper. Adding support for a new binding type means: write a `instrumentX(item, name)` in `src/instrumentation/x.ts`, add a guard + dispatch branch here. Order matters — JSRPC and KV both have catch-all-ish surfaces, so the JSRPC check runs first.
+`instrumentEnv` returns a Proxy around the user's `env` object. On property access, it sniffs the value with duck-typed guards (`isKVNamespace`, `isQueue`, `isJSRPC`, `isD1Database`, `isDurableObjectNamespace`, `isAnalyticsEngineDataset`, `isVectorize`, `isVersionMetadata`) and returns the matching instrumented wrapper. Adding support for a new binding type means: write a `instrumentX(item, name)` in `src/instrumentation/x.ts`, add a guard + dispatch branch here. Order matters — JSRPC and KV both have catch-all-ish surfaces, so the JSRPC check runs first.
 
 ### Context propagation
 
@@ -61,7 +61,7 @@ Two-stage: head sampling (a standard OTel `Sampler`, defaults to `AlwaysOnSample
 Two parallel paths exist:
 
 1. **Legacy** (`instrumentDO` → `src/instrumentation/do.ts`): proxies the DO class constructor, then wraps the resulting object's `fetch`/`alarm` methods. Each invocation builds a fresh config via the initialiser.
-2. **RPC** (`InstrumentedDurableObject` + `instrumentDOClassMetadata` in `src/instrumentation/do-class.ts`): method decorator approach for newer RPC-style DOs. Trace context propagates as a `metadata` field set via the `_setOpts` RPC call before the real RPC. `InstrumentedDurableObject.getInstance(ns, key)` is the helper that injects the W3C context and calls `_setOpts` for you.
+2. **RPC** (`InstrumentedDurableObject` + `instrumentDOClassMetadata` in `src/instrumentation/do-class.ts`): method decorator approach for newer RPC-style DOs. Caller-side stubs are wrapped in two places — `InstrumentedDurableObject.getInstance(ns, key)` and the DO-namespace branch of `instrumentEnv` — so every RPC method emits a CLIENT span and carries a per-call `{ __otel_carrier }` marker appended to its arguments. The server-side decorator strips that marker before user code and parents its span to the extracted context; `_setOpts` is kept as the fallback for callers that bypass the wrapper.
 
 Both paths instrument `state.storage` via `instrumentStorage` in `src/instrumentation/do-storage.ts`.
 

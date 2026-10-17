@@ -4,7 +4,7 @@ import { instrumentEnv } from './env'
 import { exportSpans, proxyExecutionContext } from './common'
 import { getParentContextFromMetadata } from './entrypoint'
 import { Logger, ResolvedTraceConfig } from '../types'
-import { instrumentState } from './do'
+import { extractOtelCarrier, instrumentBindingStub, instrumentState } from './do'
 import { DurableObject } from 'cloudflare:workers'
 import { ATTR_FAAS_TRIGGER } from '@opentelemetry/semantic-conventions/incubating'
 
@@ -32,7 +32,7 @@ export abstract class InstrumentedDurableObject<Env extends Record<string, unkno
 			throw new Error('DO identifier cannot be null or undefined.')
 		}
 		const id: DurableObjectId = doNamespace.idFromName(key)
-		const stub = doNamespace.get(id)
+		const stub = instrumentBindingStub(doNamespace.get(id), this.name) as DurableObjectStub<T>
 		const metadata: Record<string, unknown> = {}
 		propagation.inject(api_context.active(), metadata, {
 			set: (h, k, v) => (h[k] = typeof v === 'string' ? v : String(v)),
@@ -93,8 +93,9 @@ export function createDoMethodHandler(initialiser: Initialiser): MethodDecorator
 		const original = descriptor.value
 		descriptor.value = async function (...args: unknown[]) {
 			const originalRef = this as Target
+			const { args: callArgs, carrier } = extractOtelCarrier(args)
 			if (propertyKey.startsWith('_')) {
-				return await original.apply(originalRef, args)
+				return await original.apply(originalRef, callArgs)
 			}
 			const orig_env = originalRef['env']
 			const orig_ctx = originalRef['ctx']
@@ -109,9 +110,9 @@ export function createDoMethodHandler(initialiser: Initialiser): MethodDecorator
 						if (!!metadata) {
 							originalRef['_logger']['rootSpan'] = trace.getActiveSpan()
 						}
-						return original.apply(originalRef, args)
+						return original.apply(originalRef, callArgs)
 					}
-					const spanContext = getParentContextFromDO(config, metadata)
+					const spanContext = carrier ? getParentContextFromMetadata(carrier) : getParentContextFromDO(config, metadata)
 					const tracer = trace.getTracer('doClassHandler')
 					const options: SpanOptions = {
 						attributes: {
@@ -131,7 +132,7 @@ export function createDoMethodHandler(initialiser: Initialiser): MethodDecorator
 							const traceId = span.spanContext().traceId
 							api_context.active().setValue(traceIdSymbol, traceId)
 							try {
-								const result = await original.apply(originalRef, args)
+								const result = await original.apply(originalRef, callArgs)
 								span.end()
 								return result
 							} catch (error) {

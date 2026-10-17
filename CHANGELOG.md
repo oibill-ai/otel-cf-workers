@@ -1,5 +1,11 @@
 # @microlabs/otel-cf-workers
 
+## 1.0.0-fp.67
+
+### Minor Changes
+
+- 7c99d28: Trace the caller side of Durable Object RPC calls with a client span and per-call context
+
 ## 1.0.0-fp.66
 
 ### Patch Changes

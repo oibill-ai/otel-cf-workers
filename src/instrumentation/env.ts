@@ -6,6 +6,7 @@ import { instrumentD1 } from './d1'
 import { instrumentAnalyticsEngineDataset } from './analytics-engine.js'
 import { instrumentVectorize } from './vectorize.js'
 import { instrumentEmailServiceSend } from './send-email.js'
+import { instrumentDOBinding } from './do.js'
 
 const isJSRPC = (item?: unknown): item is Service => {
 	// @ts-expect-error The point of RPC types is to block non-existent properties, but that's the goal here
@@ -25,6 +26,15 @@ export const isVersionMetadata = (item?: unknown): item is WorkerVersionMetadata
 		!isJSRPC(item) &&
 		typeof (item as WorkerVersionMetadata)?.id === 'string' &&
 		typeof (item as WorkerVersionMetadata)?.tag === 'string'
+	)
+}
+
+export const isDurableObjectNamespace = (item?: unknown): item is DurableObjectNamespace => {
+	return (
+		!isJSRPC(item) &&
+		typeof (item as DurableObjectNamespace)?.idFromName === 'function' &&
+		typeof (item as DurableObjectNamespace)?.get === 'function' &&
+		typeof (item as DurableObjectNamespace)?.newUniqueId === 'function'
 	)
 }
 
@@ -60,6 +70,8 @@ const instrumentEnv = (env: Record<string, unknown>): Record<string, unknown> =>
 			} else if (isVersionMetadata(item)) {
 				// we do not need to log accesses to the metadata
 				return item
+			} else if (isDurableObjectNamespace(item)) {
+				return instrumentDOBinding(item, String(prop))
 			} else if (isAnalyticsEngineDataset(item)) {
 				return instrumentAnalyticsEngineDataset(item, String(prop))
 			} else if (isD1Database(item)) {
