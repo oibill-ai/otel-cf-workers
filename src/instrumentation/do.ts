@@ -1,4 +1,12 @@
-import { context as api_context, trace, SpanOptions, SpanKind, Exception, SpanStatusCode } from '@opentelemetry/api'
+import {
+	context as api_context,
+	trace,
+	SpanOptions,
+	SpanKind,
+	Exception,
+	SpanStatusCode,
+	propagation,
+} from '@opentelemetry/api'
 import { passthroughGet, unwrap, wrap } from '../wrap.js'
 import {
 	getParentContextFromHeaders,
@@ -8,7 +16,7 @@ import {
 	instrumentClientFetch,
 } from './fetch.js'
 import { instrumentEnv } from './env.js'
-import { Initialiser, setConfig } from '../config.js'
+import { Initialiser, getActiveConfig, setConfig } from '../config.js'
 import { exportSpans } from './common.js'
 import { instrumentStorage } from './do-storage.js'
 import { DOConstructorTrigger } from '../types.js'
@@ -18,7 +26,74 @@ type FetchFn = DurableObject['fetch']
 type AlarmFn = DurableObject['alarm']
 type Env = Record<string, unknown>
 
-function instrumentBindingStub(stub: DurableObjectStub, nsName: string): DurableObjectStub {
+export const OTEL_CARRIER_KEY = '__otel_carrier'
+
+export type OtelCarrier = Record<string, string>
+type OtelCarrierMarker = { [OTEL_CARRIER_KEY]: OtelCarrier }
+
+function isOtelCarrierMarker(value: unknown): value is OtelCarrierMarker {
+	return typeof value === 'object' && value !== null && OTEL_CARRIER_KEY in value
+}
+
+/**
+ * Removes the per-call trace-context marker from an RPC call's arguments.
+ * The marker is appended by the client stub wrapper and must never reach user code.
+ */
+export function extractOtelCarrier(args: unknown[]): { args: unknown[]; carrier?: OtelCarrier } {
+	const last = args[args.length - 1]
+	if (isOtelCarrierMarker(last)) {
+		return { args: args.slice(0, -1), carrier: last[OTEL_CARRIER_KEY] }
+	}
+	return { args }
+}
+
+function injectOtelCarrier(): OtelCarrier {
+	const carrier: OtelCarrier = {}
+	propagation.inject(api_context.active(), carrier, {
+		set: (h, k, v) => (h[k] = typeof v === 'string' ? v : String(v)),
+	})
+	return carrier
+}
+
+function instrumentClientDoRpc(
+	stub: DurableObjectStub,
+	nsName: string,
+	method: string,
+): (...args: unknown[]) => unknown {
+	return function instrumentedDoRpcCall(...args: unknown[]): unknown {
+		const workerConfig = getActiveConfig()
+		if (!workerConfig) {
+			return passthroughGet(stub, method)(...args)
+		}
+
+		const target = unwrap(stub)
+		const tracer = trace.getTracer('do-rpc-client')
+		const options: SpanOptions = {
+			kind: SpanKind.CLIENT,
+			attributes: {
+				'do.namespace': nsName,
+				'do.id': target.id.toString(),
+				'do.id.name': target.id.name,
+				'rpc.method': method,
+			},
+		}
+
+		const promise = tracer.startActiveSpan(`DO RPC client ${nsName}.${method}`, options, async (span) => {
+			try {
+				return await passthroughGet(stub, method)(...args, { [OTEL_CARRIER_KEY]: injectOtelCarrier() })
+			} catch (error) {
+				span.recordException(error as Exception)
+				span.setStatus({ code: SpanStatusCode.ERROR })
+				throw error
+			} finally {
+				span.end()
+			}
+		})
+		return promise
+	}
+}
+
+export function instrumentBindingStub(stub: DurableObjectStub, nsName: string): DurableObjectStub {
 	const stubHandler: ProxyHandler<typeof stub> = {
 		get(target, prop) {
 			if (prop === 'fetch') {
@@ -30,9 +105,14 @@ function instrumentBindingStub(stub: DurableObjectStub, nsName: string): Durable
 					'do.id.name': target.id.name,
 				}
 				return instrumentClientFetch(fetcher, () => ({ includeTraceContext: true }), attrs)
-			} else {
+			}
+			if (typeof prop === 'symbol' || prop === 'then' || prop.startsWith('_')) {
 				return passthroughGet(target, prop)
 			}
+			if (typeof Reflect.get(target, prop) !== 'function') {
+				return passthroughGet(target, prop)
+			}
+			return instrumentClientDoRpc(target, nsName, prop)
 		},
 	}
 	return wrap(stub, stubHandler)
