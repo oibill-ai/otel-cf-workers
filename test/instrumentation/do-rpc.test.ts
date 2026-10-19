@@ -45,7 +45,6 @@ function asRpcMethods(stub: DurableObjectStub): Record<string, (...args: unknown
 type TestDOInstance = {
 	env: Record<string, unknown>
 	ctx: { waitUntil: (promise: Promise<unknown>) => void }
-	metadata: Record<string, unknown>
 	_logger: Record<string, unknown>
 	greet: (...args: unknown[]) => Promise<string>
 }
@@ -55,7 +54,6 @@ function createInstrumentedDO(): { instance: TestDOInstance; received: unknown[]
 	class TestDO {
 		env: Record<string, unknown> = {}
 		ctx = { waitUntil: () => undefined }
-		metadata: Record<string, unknown> = {}
 		_logger: Record<string, unknown> = {}
 		async greet(...args: unknown[]): Promise<string> {
 			received.push(args)
@@ -140,6 +138,30 @@ describe('DO RPC client span', () => {
 		expect(servers.map((span) => span.parentSpanId)).toEqual(clients.map((span) => span.spanContext().spanId))
 	})
 
+	test('tags an unwrapped caller and runs the method in a fresh trace', async () => {
+		const warn = vitest.spyOn(console, 'warn').mockImplementation(() => undefined)
+		const { instance, received } = createInstrumentedDO()
+		const tracer = trace.getTracer('test')
+
+		let callerTraceId = ''
+		let result: string | undefined
+		await tracer.startActiveSpan('unwrapped caller', async (callerSpan) => {
+			callerTraceId = callerSpan.spanContext().traceId
+			// Simulate an uninstrumented caller reaching the DO: no carrier and no caller context inside.
+			result = await api_context.with(ROOT_CONTEXT, () => instance.greet('world'))
+			callerSpan.end()
+		})
+
+		expect(result).toBe('Hello world')
+		expect(received).toEqual([['world']])
+		expect(warn).toHaveBeenCalled()
+
+		const span = exporter.getFinishedSpans().find((candidate) => candidate.name === 'DO RPC TestDO.greet')
+		expect(span).toBeDefined()
+		expect(span?.attributes['otel.do.unwrapped_caller']).toBe(true)
+		expect(span?.spanContext().traceId).not.toBe(callerTraceId)
+	})
+
 	test('records exceptions and sets ERROR status when the call throws', async () => {
 		const error = new Error('boom')
 		const stub = createStub({
@@ -156,8 +178,9 @@ describe('DO RPC client span', () => {
 		expect(client?.events.some((event) => event.name === 'exception')).toBe(true)
 	})
 
-	test('getInstance returns a stub whose RPC calls are traced', async () => {
-		const stub = createStub({ greet: () => 'hi', _setOpts: async () => undefined })
+	test('getInstance returns a wrapped stub without an RPC round-trip', async () => {
+		const setOpts = vitest.fn(async () => undefined)
+		const stub = createStub({ greet: () => 'hi', _setOpts: setOpts })
 		const namespace = {
 			idFromName: () => ({ toString: () => 'do-id-1', name: 'testing' }),
 			get: () => stub,
@@ -167,6 +190,10 @@ describe('DO RPC client span', () => {
 			key: string,
 		) => Promise<DurableObjectStub>
 		const wrapped = await getInstance.call({ name: 'UserDo' }, namespace, 'testing')
+
+		// There is no per-instance propagation: creating the stub must not call the DO at all.
+		expect(setOpts).not.toHaveBeenCalled()
+		expect(exporter.getFinishedSpans()).toHaveLength(0)
 
 		await withConfig(() => asRpcMethods(wrapped)['greet']!())
 

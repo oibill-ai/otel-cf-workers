@@ -2576,7 +2576,7 @@ function createScheduledHandler(scheduledFn, initialiser) {
 }
 
 // versions.json
-var _microlabs_otel_cf_workers = "1.0.0-fp.67";
+var _microlabs_otel_cf_workers = "1.0.0-fp.68";
 var node = "22.14.0";
 
 // src/instrumentation/email.ts
@@ -2817,7 +2817,6 @@ import { DurableObject } from "cloudflare:workers";
 import { ATTR_FAAS_TRIGGER as ATTR_FAAS_TRIGGER6 } from "@opentelemetry/semantic-conventions/incubating";
 var traceIdSymbol4 = /* @__PURE__ */ Symbol("traceId");
 var InstrumentedDurableObject = class extends DurableObject {
-  _metadata = {};
   _logger;
   _instrumentedCtx;
   _instrumentedEnv;
@@ -2832,13 +2831,7 @@ var InstrumentedDurableObject = class extends DurableObject {
       throw new Error("DO identifier cannot be null or undefined.");
     }
     const id = doNamespace.idFromName(key);
-    const stub = instrumentBindingStub(doNamespace.get(id), this.name);
-    const metadata = {};
-    propagation6.inject(api_context10.active(), metadata, {
-      set: (h, k, v) => h[k] = typeof v === "string" ? v : String(v)
-    });
-    await stub._setOpts(metadata);
-    return stub;
+    return instrumentBindingStub(doNamespace.get(id), this.name);
   }
   _getCurrentTraceContext() {
     const metadata = {};
@@ -2850,28 +2843,10 @@ var InstrumentedDurableObject = class extends DurableObject {
   get logger() {
     return this._logger;
   }
-  get metadata() {
-    return this._metadata;
-  }
-  set metadata(metadata) {
-    this._metadata = metadata;
-  }
   get storage() {
     return this._instrumentedCtx.storage;
   }
-  async _setOpts(metadata) {
-    if (!this._metadata || Object.keys(this._metadata).length === 0) {
-      this.metadata = metadata;
-    }
-  }
 };
-function getParentContextFromDO(workerConfig, metadata) {
-  if (workerConfig === void 0) {
-    return api_context10.active();
-  }
-  const acceptTraceContext = workerConfig.handlers.fetch.acceptTraceContext ?? true;
-  return acceptTraceContext && !!metadata ? getParentContextFromMetadata(metadata ?? {}) : api_context10.active();
-}
 function createDoMethodHandler(initialiser) {
   const decorator = (target, propertyKey, descriptor) => {
     const original = descriptor.value;
@@ -2887,20 +2862,19 @@ function createDoMethodHandler(initialiser) {
       const { tracker } = proxyExecutionContext(orig_ctx);
       const context3 = setConfig(config);
       try {
-        const metadata = originalRef["metadata"];
         const executeEntrypointHandler = () => {
-          if (propertyKey.startsWith("_")) {
-            if (!!metadata) {
-              originalRef["_logger"]["rootSpan"] = trace21.getActiveSpan();
-            }
-            return original.apply(originalRef, callArgs);
+          const spanContext = carrier ? getParentContextFromMetadata(carrier) : api_context10.active();
+          if (!carrier) {
+            console.warn(
+              `[otel-cf-workers] DO RPC ${target.constructor.name}.${propertyKey} was called without a trace carrier. The caller is not instrumented, so this call starts a new trace.`
+            );
           }
-          const spanContext = carrier ? getParentContextFromMetadata(carrier) : getParentContextFromDO(config, metadata);
           const tracer2 = trace21.getTracer("doClassHandler");
           const options = {
             attributes: {
               [ATTR_FAAS_TRIGGER6]: "do-rpc",
-              "rpc.function.name": propertyKey
+              "rpc.function.name": propertyKey,
+              ...carrier ? {} : { "otel.do.unwrapped_caller": true }
             },
             kind: SpanKind18.SERVER
           };
@@ -2909,9 +2883,7 @@ function createDoMethodHandler(initialiser) {
             options,
             spanContext,
             async (span) => {
-              if (!!metadata) {
-                originalRef["_logger"]["rootSpan"] = span;
-              }
+              originalRef["_logger"]["rootSpan"] = span;
               const traceId = span.spanContext().traceId;
               api_context10.active().setValue(traceIdSymbol4, traceId);
               try {

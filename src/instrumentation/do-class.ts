@@ -3,7 +3,7 @@ import { propagation, context as api_context, trace, SpanOptions, SpanKind, Exce
 import { instrumentEnv } from './env'
 import { exportSpans, proxyExecutionContext } from './common'
 import { getParentContextFromMetadata } from './entrypoint'
-import { Logger, ResolvedTraceConfig } from '../types'
+import { Logger } from '../types'
 import { extractOtelCarrier, instrumentBindingStub, instrumentState } from './do'
 import { DurableObject } from 'cloudflare:workers'
 import { ATTR_FAAS_TRIGGER } from '@opentelemetry/semantic-conventions/incubating'
@@ -11,7 +11,6 @@ import { ATTR_FAAS_TRIGGER } from '@opentelemetry/semantic-conventions/incubatin
 const traceIdSymbol = Symbol('traceId')
 
 export abstract class InstrumentedDurableObject<Env extends Record<string, unknown>> extends DurableObject<Env> {
-	private _metadata: Record<string, unknown> = {}
 	private _logger: Logger
 	private _instrumentedCtx: DurableObjectState
 	protected _instrumentedEnv: Env
@@ -32,13 +31,7 @@ export abstract class InstrumentedDurableObject<Env extends Record<string, unkno
 			throw new Error('DO identifier cannot be null or undefined.')
 		}
 		const id: DurableObjectId = doNamespace.idFromName(key)
-		const stub = instrumentBindingStub(doNamespace.get(id), this.name) as DurableObjectStub<T>
-		const metadata: Record<string, unknown> = {}
-		propagation.inject(api_context.active(), metadata, {
-			set: (h, k, v) => (h[k] = typeof v === 'string' ? v : String(v)),
-		})
-		await stub._setOpts(metadata)
-		return stub
+		return instrumentBindingStub(doNamespace.get(id), this.name) as DurableObjectStub<T>
 	}
 
 	protected _getCurrentTraceContext(): Record<string, unknown> {
@@ -53,34 +46,9 @@ export abstract class InstrumentedDurableObject<Env extends Record<string, unkno
 		return this._logger
 	}
 
-	protected get metadata() {
-		return this._metadata
-	}
-
-	private set metadata(metadata) {
-		this._metadata = metadata
-	}
-
 	protected get storage() {
 		return this._instrumentedCtx.storage
 	}
-
-	async _setOpts(metadata: Record<string, unknown>): Promise<void> {
-		if (!this._metadata || Object.keys(this._metadata).length === 0) {
-			this.metadata = metadata
-		}
-	}
-}
-
-function getParentContextFromDO(workerConfig: ResolvedTraceConfig | undefined, metadata: Record<string, unknown>) {
-	if (workerConfig === undefined) {
-		return api_context.active()
-	}
-
-	const acceptTraceContext = workerConfig.handlers.fetch.acceptTraceContext ?? true
-	return acceptTraceContext && !!metadata
-		? getParentContextFromMetadata((metadata as Record<string, string | string[] | undefined>) ?? {})
-		: api_context.active()
 }
 
 export function createDoMethodHandler(initialiser: Initialiser): MethodDecorator {
@@ -104,20 +72,20 @@ export function createDoMethodHandler(initialiser: Initialiser): MethodDecorator
 			const context = setConfig(config)
 
 			try {
-				const metadata = originalRef['metadata']
 				const executeEntrypointHandler = (): Promise<unknown> => {
-					if (propertyKey.startsWith('_')) {
-						if (!!metadata) {
-							originalRef['_logger']['rootSpan'] = trace.getActiveSpan()
-						}
-						return original.apply(originalRef, callArgs)
+					const spanContext = carrier ? getParentContextFromMetadata(carrier) : api_context.active()
+					if (!carrier) {
+						console.warn(
+							`[otel-cf-workers] DO RPC ${target.constructor.name}.${propertyKey} was called without a trace carrier. ` +
+								'The caller is not instrumented, so this call starts a new trace.',
+						)
 					}
-					const spanContext = carrier ? getParentContextFromMetadata(carrier) : getParentContextFromDO(config, metadata)
 					const tracer = trace.getTracer('doClassHandler')
 					const options: SpanOptions = {
 						attributes: {
 							[ATTR_FAAS_TRIGGER]: 'do-rpc',
 							'rpc.function.name': propertyKey,
+							...(carrier ? {} : { 'otel.do.unwrapped_caller': true }),
 						},
 						kind: SpanKind.SERVER,
 					}
@@ -126,9 +94,7 @@ export function createDoMethodHandler(initialiser: Initialiser): MethodDecorator
 						options,
 						spanContext,
 						async (span) => {
-							if (!!metadata) {
-								originalRef['_logger']['rootSpan'] = span
-							}
+							originalRef['_logger']['rootSpan'] = span
 							const traceId = span.spanContext().traceId
 							api_context.active().setValue(traceIdSymbol, traceId)
 							try {

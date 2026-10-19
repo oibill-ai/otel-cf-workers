@@ -298,7 +298,6 @@ declare abstract class InstrumentedEntrypoint<E extends Record<string, unknown>>
 }
 
 declare abstract class InstrumentedDurableObject<Env extends Record<string, unknown>> extends DurableObject$1<Env> {
-    private _metadata;
     private _logger;
     private _instrumentedCtx;
     protected _instrumentedEnv: Env;
@@ -306,10 +305,7 @@ declare abstract class InstrumentedDurableObject<Env extends Record<string, unkn
     static getInstance<T extends InstrumentedDurableObject<Record<string, unknown>>>(doNamespace: DurableObjectNamespace<T>, key: string): Promise<DurableObjectStub<T>>;
     protected _getCurrentTraceContext(): Record<string, unknown>;
     protected get logger(): Logger;
-    protected get metadata(): Record<string, unknown>;
-    private set metadata(value);
     protected get storage(): DurableObjectStorage;
-    _setOpts(metadata: Record<string, unknown>): Promise<void>;
 }
 
 type ResolveConfigFn<Env = any> = (env: Env, trigger: Trigger) => TraceConfig;
